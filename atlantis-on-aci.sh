@@ -13,8 +13,7 @@ if [ "$GITHUB_TOKEN" == "" ]; then
 fi
 
 if [ "$GITHUB_WEBHOOK_SECRET" == "" ]; then
-    echo "GITHUB_WEBHOOK_SECRET variable not set."
-    exit 1
+    GITHUB_WEBHOOK_SECRET=$(openssl rand -hex 32)
 fi
 
 if [ "$REPO_WHITELIST" == "" ]; then
@@ -28,7 +27,7 @@ if [ "$ATLANTIS_LOCATION" == "" ]; then
 fi
 
 if [ "$SUFFIX" == "" ]; then
-    SUFFIX=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 10 | head -n 1)
+    SUFFIX=$(cat /dev/urandom | LC_ALL=C LC_CTYPE=C tr -dc 'a-z0-9' | fold -w 10 | head -n 1)
 fi
 
 if [ "$ATLANTIS_RG_NAME" == "" ]; then
@@ -36,7 +35,7 @@ if [ "$ATLANTIS_RG_NAME" == "" ]; then
 fi
 
 if [ "$ATLANTIS_STORAGE_NAME" == "" ]; then
-    ATLANTIS_STORAGE_NAME="atlantisstorage$SUFFIX"
+    ATLANTIS_STORAGE_NAME=$(echo "atlantisstorage$SUFFIX" | head -c 24)
 fi
 
 if [ "$ATLANTIS_STORAGE_STATE_CONTAINER_NAME" == "" ]; then
@@ -91,19 +90,19 @@ openssl req \
     -keyout atlantis.key
 
 az storage share create \
-    --name "atlantis-cert-share" \
+    --name "atlantis-config-share" \
     --account-name $ATLANTIS_STORAGE_NAME \
     --account-key $STORAGE_KEY
 
 az storage file upload \
-    --share-name "atlantis-cert-share" \
+    --share-name "atlantis-config-share" \
     --source ./atlantis.crt \
     --account-name $ATLANTIS_STORAGE_NAME \
     --account-key $STORAGE_KEY
 
 az storage file upload \
-    --share-name "atlantis-cert-share" \
-    --source ./atlantis.key \
+    --share-name "atlantis-config-share" \
+    --source ./repos.yaml \
     --account-name $ATLANTIS_STORAGE_NAME \
     --account-key $STORAGE_KEY
 
@@ -117,8 +116,8 @@ az container create \
     --scope /subscriptions/$SUB_ID \
     --azure-file-volume-account-name $ATLANTIS_STORAGE_NAME \
     --azure-file-volume-account-key $STORAGE_KEY \
-    --azure-file-volume-share-name "atlantis-cert-share" \
-    --azure-file-volume-mount-path /mnt/atlantis-certs \
+    --azure-file-volume-share-name "atlantis-config-share" \
+    --azure-file-volume-mount-path /mnt/atlantis-config \
     --image runatlantis/atlantis:latest \
     --os-type Linux \
     --restart-policy OnFailure \
@@ -128,14 +127,21 @@ az container create \
     --dns-name-label $ATLANTIS_CONTAINER_DNS_NAME \
     --command-line "atlantis server \
         --gh-user=$GITHUB_USER \
-        --gh-token=$GITHUB_TOKEN \
-        --gh-webhook-secret=$GITHUB_WEBHOOK_SECRET \
         --repo-whitelist=$REPO_WHITELIST \
-        --ssl-cert-file=/mnt/atlantis-certs/atlantis.crt \
-        --ssl-key-file=/mnt/atlantis-certs/atlantis.key" \
+        --repo-config=/mnt/atlantis-config/repos.yaml \
+        --ssl-cert-file=/mnt/atlantis-config/atlantis.crt \
+        --ssl-key-file=/mnt/secrets/atlantis_key" \
     --environment-variables \
         ARM_USE_MSI=true \
         ARM_SKIP_CREDENTIALS_VALIDATION=$SKIP_CREDENTIALS_VALIDATION \
         ARM_SKIP_PROVIDER_REGISTRATION=$SKIP_PROVIDER_REGISTRATION \
+        ARM_SUBSCRIPTION_ID=$SUB_ID \
+    --secure-environment-variables \
         ARM_ACCESS_KEY=$STORAGE_KEY \
-        ARM_SUBSCRIPTION_ID=$SUB_ID
+        ATLANTIS_GH_TOKEN=$GITHUB_TOKEN \
+        ATLANTIS_GH_WEBHOOK_SECRET=$GITHUB_WEBHOOK_SECRET \
+    --secrets atlantis_key="$(cat atlantis.key)" \
+    --secrets-mount-path /mnt/secrets
+
+echo "Webhook URL: https://$ATLANTIS_CONTAINER_DNS_NAME.$ATLANTIS_LOCATION.azurecontainer.io:4141/events"
+echo "Webhook secret: $GITHUB_WEBHOOK_SECRET"
